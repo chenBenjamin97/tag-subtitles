@@ -1,6 +1,6 @@
 from PyQt5.QtWidgets import QApplication, QComboBox, QLabel, QLineEdit, QMessageBox, QTableWidget, QWidget, QPushButton, QHBoxLayout, QVBoxLayout,\
     QSlider, QStyle, QFileDialog, QTableWidget,QTableWidgetItem
-import sys, os
+import sys, os, shutil
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtMultimediaWidgets import QVideoWidget
 from PyQt5.QtGui import QIcon, QPalette
@@ -12,6 +12,7 @@ import string
 from shutil import copyfile
 from moviepy.video.io.VideoFileClip import VideoFileClip
 from moviepy.video.io.ffmpeg_tools import ffmpeg_extract_subclip
+from datetime import datetime
 
 class VideoSubtitleWindow(QWidget):
     def __init__(self):
@@ -270,19 +271,30 @@ class VideoSubtitleWindow(QWidget):
 
     def handle_user_confirmation(self, clickedBtn):
         if clickedBtn.text() == 'OK':
-            if isolateLipsFromVideo(self.videoFullPath, self.tmpLipsIsolatedVideo) == 0:
-                self.create_tagged_data_for_each_word()
-                
-                #remove isolated video with full length, not clipped
-                os.remove(self.tmpLipsIsolatedVideo)
+            #if isolateLipsFromVideo(self.videoFullPath, self.tmpLipsIsolatedVideo) == 0:
+            now = datetime.now()
+            start_time = now.strftime("%H:%M:%S")
+            print('Starting to process each word now. Time: ', start_time)
 
-                finishedJobAlert = QMessageBox()
-                finishedJobAlert.setWindowTitle("Finished Job")
-                finishedJobAlert.setWindowIcon(QIcon('./icons/playerIcon.jpg'))
-                finishedJobAlert.setText("Finished")
-                finishedJobAlert.setStandardButtons(QMessageBox.Ok)
-                finishedJobAlert.buttonClicked.connect(self.close_window)
-                finishedJobAlert.exec_()
+            self.create_tagged_data_for_each_word()
+
+            now = datetime.now()
+            finish_time = now.strftime("%H:%M:%S")
+            print('Finished to process words. Time: ', finish_time)
+            
+            tdelta = datetime.strptime(finish_time, '%H:%M:%S') - datetime.strptime(start_time, '%H:%M:%S')
+            print('Total work time: ', tdelta)
+            
+            #remove isolated video with full length, not clipped
+            #os.remove(self.tmpLipsIsolatedVideo)
+
+            finishedJobAlert = QMessageBox()
+            finishedJobAlert.setWindowTitle("Finished Job")
+            finishedJobAlert.setWindowIcon(QIcon('./icons/playerIcon.jpg'))
+            finishedJobAlert.setText("Finished")
+            finishedJobAlert.setStandardButtons(QMessageBox.Ok)
+            finishedJobAlert.buttonClicked.connect(self.close_window)
+            finishedJobAlert.exec_()
         #Else - do nothing
 
     def close_window(self):
@@ -299,7 +311,7 @@ class VideoSubtitleWindow(QWidget):
             endTimeItem = self.capturedWordsTable.item(rowIndex, 2).text()
             
             if textItem != "" and startTimeItem != "" and endTimeItem != "":
-                create_sub_clip_and_audio(textItem, self.rootOfTaggedDataDir, self.videoFullPath, self.tmpLipsIsolatedVideo, int(startTimeItem)/1000, int(endTimeItem)/1000)        
+                create_sub_clip_and_audio(textItem, self.rootOfTaggedDataDir, self.videoFullPath, self.tmpLipsIsolatedVideo, int(startTimeItem)/1000, int(endTimeItem)/1000)
 
 def create_sub_clip_and_audio(wantedlabel, taggedDataRootDirPath, srcVideoPath, isolatedLipsVideoPath, msStartTime, msEndTime):
     if not os.path.isdir(taggedDataRootDirPath):
@@ -307,9 +319,22 @@ def create_sub_clip_and_audio(wantedlabel, taggedDataRootDirPath, srcVideoPath, 
     
     wantedDirPath = os.path.join(taggedDataRootDirPath, wantedlabel)
     
-    #Because moviepy can't handle UTF-8  
+    #Using 'tmp' directory because moviepy can't handle UTF-8
     tmpDirpath = os.path.join(taggedDataRootDirPath, 'tmp')
-    os.mkdir(tmpDirpath)
+
+    #Make tmpDirpath ready for our use
+    if os.path.isdir(tmpDirpath): #Probably leftovers of other session - empty this filder bedore using it
+        for filename in os.listdir(tmpDirpath):
+            file_path = os.path.join(tmpDirpath, filename)
+            try:
+                if os.path.isfile(file_path) or os.path.islink(file_path):
+                    os.unlink(file_path)
+                elif os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
+            except Exception as e:
+                print('Failed to delete %s. Reason: %s' % (file_path, e))
+    else: #Creating new folder with this path
+        os.mkdir(tmpDirpath)
 
     while (True):
         randomFileName = get_random_string(10)
@@ -317,13 +342,48 @@ def create_sub_clip_and_audio(wantedlabel, taggedDataRootDirPath, srcVideoPath, 
         audioFullPath = os.path.join(tmpDirpath, randomFileName + '.wav')
         if (not os.path.isfile(videoFullPath)) and (not os.path.isfile(audioFullPath)):
             break
+    
     #Create video clip
-    ffmpeg_extract_subclip(isolatedLipsVideoPath, msStartTime, msEndTime, os.path.join(tmpDirpath, randomFileName + '.avi'))
+    now = datetime.now()
+    current_time = now.strftime("%H:%M:%S")
+    print('create_sub_clip_and_audio: function starts to create subclip. Time: ', current_time)
+
+    tmpSubClip = os.path.join(tmpDirpath, randomFileName  + '_subClipFromSrc' + '.avi')
+
+    #Creating sub-clip with wanted times of source video
+    ffmpeg_extract_subclip(srcVideoPath, msStartTime, msEndTime, tmpSubClip)
+
+    #Isolating lips ROI with fixed size from tmpSubClip
+    try:
+        if isolateLipsFromVideo(tmpSubClip, videoFullPath) == 0:
+            os.remove(tmpSubClip)
+        else:
+            os.remove(tmpSubClip)
+            os.remove(videoFullPath) #remove lesftovers
+            os.rmdir(tmpDirpath)
+            return 1 #break function here
+    except: #in case opencv/dlib failed and exited function
+        os.remove(tmpSubClip)
+        os.remove(videoFullPath) #remove lesftovers
+        os.rmdir(tmpDirpath)
+        return 1 #break function here
+
+    now = datetime.now()
+    current_time = now.strftime("%H:%M:%S")
+    print('create_sub_clip_and_audio: function finished to create subclip. Time: ', current_time)
     
     #create audio clip
+    now = datetime.now()
+    current_time = now.strftime("%H:%M:%S")
+    print('create_sub_clip_and_audio: function starts to create sub audio file. Time: ', current_time)
+
     clipWithAudio = VideoFileClip(srcVideoPath).subclip(msStartTime, msEndTime)
     audioOnly = clipWithAudio.audio
     audioOnly.write_audiofile(os.path.join(tmpDirpath, randomFileName + '.wav'))
+
+    now = datetime.now()
+    current_time = now.strftime("%H:%M:%S")
+    print('create_sub_clip_and_audio: function finished to create sub audio file Time: ', current_time)
 
     if os.path.isdir(wantedDirPath): #if wantedDirPath already exist - copy files into it
         copyfile(os.path.join(tmpDirpath, randomFileName + '.avi'), os.path.join(wantedDirPath, randomFileName + '.avi'))
@@ -339,6 +399,10 @@ def create_sub_clip_and_audio(wantedlabel, taggedDataRootDirPath, srcVideoPath, 
 #extractLipsFromVideo returns 0 if worked as expected, otherwise - 1.
 #It create the file 'extractedLips.avi'
 def isolateLipsFromVideo(srcFilePath, dstFilePath):
+    now = datetime.now()
+    current_time = now.strftime("%H:%M:%S")
+    print('isolateLipsFromVideo: function Starts Now. Time: ', current_time)
+
     #Init face detector
     detector = dlib.get_frontal_face_detector()
 
@@ -396,10 +460,15 @@ def isolateLipsFromVideo(srcFilePath, dstFilePath):
         #Release video input object
         videoSrc.release()
     
+
     #Now, we'll write the new video with extracted lips into an 'AVI' video format file
     frameWidth = maxX - minX + (2*lipsMargin)
     frameHeight = maxY - minY + (2*lipsMargin)
     outputVideo = cv2.VideoWriter(dstFilePath, cv2.VideoWriter_fourcc('M','J','P','G'), srcVideoFPS, (frameWidth,frameHeight))
+
+    now = datetime.now()
+    current_time = now.strftime("%H:%M:%S")
+    print('isolateLipsFromVideo: function finished to find lips boundaries. Time: ', current_time)
 
     #reopen video source file
     videoSrc = cv2.VideoCapture(srcFilePath)
@@ -451,7 +520,10 @@ def isolateLipsFromVideo(srcFilePath, dstFilePath):
             outputVideo.release()
             break
 
-    #iterate over tagged words table and create clips for each one
+    now = datetime.now()
+    current_time = now.strftime("%H:%M:%S")
+    print('isolateLipsFromVideo: function finished to create new lips isolated video. Time: ', current_time)
+
     return 0 #valid exit
 
 def get_random_string(length):
